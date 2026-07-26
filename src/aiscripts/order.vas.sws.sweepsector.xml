@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="utf-8"?>
+<aiscript name="order.vas.sws.sweepsector" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="aiscripts.xsd" version="1">
+  <!--
+    Sweep Sector default behavior.
+    Skeleton cloned from vanilla order.fight.patrol and gutted: this order decides when, how and why
+    to call the Combat Logic libs and vanilla orders; it does no combat math of its own.
+    Loop: enter sector -> scan via lib.vas.cl.scan -> issue attack via lib.vas.cl.issue.attack ->
+    (attack preempts this order; on completion this script re-enters from 'start' and rescans) ->
+    when nothing to attack, roam the sector; the CL wake heartbeat interrupts roaming for new scans.
+
+    Mod-wide config arrives through player.entity.$vas_sws_* mirrors pushed by
+    md/vas_sws_config_menu.xml; per-ship config lives in this order's params.
+  -->
+  <order id="SweepSector" name="{2026071201, 10}" description="{2026071201, 11}" category="combat" allowinloop="false" infinite="true">
+    <params>
+      <param name="space" default="null" type="sector" text="{2026071201, 19}" required="true" comment="The sector to sweep. Mandatory for UI"/>
+      <param name="attack_ships" default="true" type="bool" text="{2026071201, 20}" comment="Include hostile ships as sweep targets"/>
+      <param name="attack_stations" default="true" type="bool" text="{2026071201, 21}" comment="Include hostile stations as sweep targets"/>
+      <param name="skip_ship_mayattack" default="false" type="bool" text="{2026071201, 22}" advanced="true" comment="Bypass vanilla mayattack for hostile civilian and economy ships"/>
+      <param name="skip_station_mayattack" default="true" type="bool" text="{2026071201, 23}" advanced="true" comment="Bypass vanilla mayattack for hostile civilian and economy stations"/>
+      <param name="max_pursue_travel_distance" default="800km" type="length" text="{2026071201, 24}" advanced="true" comment="Travelled-distance pursuit budget for CL pursuit clamping - NOT vanilla straight-line pursuedistance semantics">
+        <input_param name="min" value="50km"/>
+        <input_param name="max" value="500000km"/>
+        <input_param name="step" value="50km"/>
+      </param>
+      <param name="max_attack_init_distance" default="800km" type="length" text="{2026071201, 25}" advanced="true" comment="Maximum distance at which a new attack may be initiated">
+        <input_param name="min" value="50km"/>
+        <input_param name="max" value="500000km"/>
+        <input_param name="step" value="50km"/>
+      </param>
+      <!-- RESERVED - not wired into any logic yet, deliberately commented out. Planned semantics:
+           pursuetargets         - the CL-bound pursuit switch: pursue, but clamped by the travelled-distance
+                                   budget and the sector border (this is the current always-on behavior).
+           pursuetargets_vanilla - the true unbound vanilla tunnel-vision pursuit, no CL clamping at all.
+           Wiring these up first requires making the clamps optional inside Combat Logic.
+      <param name="pursuetargets" default="true" type="bool" text="{2026071201, 26}" advanced="true" comment="Pursue targets, bounded by travel budget and sector"/>
+      <param name="pursuetargets_vanilla" default="false" type="bool" text="{2026071201, 27}" advanced="true" comment="Pursue targets the vanilla way - unbounded"/>
+      -->
+      <param name="debugchance" type="bool" default="0" advanced="true" text="{1041, 10086}" comment="Print debug output">
+        <input_param name="truevalue" value="100"/>
+      </param>
+    </params>
+    <requires>
+      <match shiptype="shiptype.lasertower" negate="true"/>
+      <match class="class.spacesuit" negate="true"/>
+    </requires>
+    <location object="$space" condition="$space.exists"/>
+  </order>
+  <interrupts>
+    <handler ref="SectorChangeHandler"/>
+    <handler ref="AttackHandler"/>
+    <handler ref="MissileLockHandler"/>
+    <handler ref="ScannedHandler"/>
+    <handler ref="InspectedHandler"/>
+    <handler ref="FoundAbandonedHandler"/>
+    <handler ref="FoundLockboxHandler"/>
+    <handler ref="ResupplyHandler"/>
+    <handler ref="TideHandler"/>
+    <handler>
+      <conditions>
+        <check_any>
+          <event_object_target_invalid object="this.ship"/>
+          <event_object_destroyed object="$space" check="false"/>
+        </check_any>
+      </conditions>
+      <actions>
+        <abort_called_scripts resume="start"/>
+      </actions>
+    </handler>
+    <!-- CL wake heartbeat -> throttled sector scan. More interrupt triggers can be added later;
+         the wake interval is the base cadence. Gates: only inside the assigned sector, never while
+         a scan or attack handoff is already in flight, and at most once per configured interval. -->
+    <handler>
+      <conditions>
+        <event_object_signalled object="this.sector" param="'vas_cl_wake'"/>
+        <check_value value="this.sector == $space"/>
+        <check_value value="not @$sws_scan_in_progress"/>
+        <check_value value="not @$sws_last_scan_time
+                  or $sws_last_scan_time + (if (@player.entity.$vas_sws_interval + '') == 'null' then 30s else player.entity.$vas_sws_interval) lt player.age"/>
+      </conditions>
+      <actions>
+        <abort_called_scripts resume="sws_scan"/>
+      </actions>
+    </handler>
+  </interrupts>
+  <init>
+    <set_command command="command.patrol"/>
+    <set_command_action commandaction="commandaction.calculating"/>
+  </init>
+  <attention min="unknown">
+    <actions>
+
+      <label name="start"/>
+
+      <!-- Resolve mod-wide config mirrors. Null-guarded so the order stays functional even if the
+           config menu has not seeded yet; fallbacks mirror the SeedDefaults values. -->
+      <set_value name="$sws_interval" exact="if (@player.entity.$vas_sws_interval + '') == 'null' then 30s else player.entity.$vas_sws_interval"/>
+      <set_value name="$sws_all_seeing" exact="if (@player.entity.$vas_sws_all_seeing + '') == 'null' then false else player.entity.$vas_sws_all_seeing"/>
+      <set_value name="$sws_allied_vision" exact="if (@player.entity.$vas_sws_allied_vision + '') == 'null' then true else player.entity.$vas_sws_allied_vision"/>
+      <set_value name="$sws_approach_max_waypoints" exact="if (@player.entity.$vas_sws_approach_max_waypoints + '') == 'null' then 4 else player.entity.$vas_sws_approach_max_waypoints"/>
+      <set_value name="$sws_ship_join_threshold" exact="if (@player.entity.$vas_sws_ship_join_threshold + '') == 'null' then 0.1 else player.entity.$vas_sws_ship_join_threshold"/>
+      <set_value name="$sws_ship_overcommit_limit" exact="if (@player.entity.$vas_sws_ship_overcommit_limit + '') == 'null' then 10 else player.entity.$vas_sws_ship_overcommit_limit"/>
+      <set_value name="$sws_station_join_threshold" exact="if (@player.entity.$vas_sws_station_join_threshold + '') == 'null' then 0.03 else player.entity.$vas_sws_station_join_threshold"/>
+      <set_value name="$sws_station_initiation_threshold" exact="if (@player.entity.$vas_sws_station_initiation_threshold + '') == 'null' then 0.15 else player.entity.$vas_sws_station_initiation_threshold"/>
+      <set_value name="$sws_potential_ally_coefficient" exact="if (@player.entity.$vas_sws_potential_ally_combatant_force_coefficient + '') == 'null' then 0.5 else player.entity.$vas_sws_potential_ally_combatant_force_coefficient"/>
+      <set_value name="$sws_force_estimation_deviation" exact="if (@player.entity.$vas_sws_force_estimation_deviation + '') == 'null' then 0.1 else player.entity.$vas_sws_force_estimation_deviation"/>
+      <!-- Per-ship debugchance and the mod-wide debug toggle both enable logging. -->
+      <set_value name="$sws_debug_chance" exact="[$debugchance, if (@player.entity.$vas_sws_debug_chance + '') == 'null' then 0 else player.entity.$vas_sws_debug_chance].max"/>
+
+      <!-- Space validation and recovery: this order sweeps exactly one sector. -->
+      <do_if value="not @$space.exists">
+        <do_if value="this.sector.exists">
+          <debug_to_file chance="$sws_debug_chance" name="this.ship.idcode" directory="'VAS_SectorSweep'" text="'[' + player.age + '] space does not exist; recovering to current sector ' + this.sector.knownname" append="true"/>
+          <set_value name="$space" exact="this.sector"/>
+          <do_if value="@this.assignedcontrolled.defaultorder.id == 'SweepSector'">
+            <edit_order_param order="this.assignedcontrolled.defaultorder" param="'space'" value="$space"/>
+          </do_if>
+          <do_if value="@this.assignedcontrolled.order.id == 'SweepSector'">
+            <edit_order_param order="this.assignedcontrolled.order" param="'space'" value="$space"/>
+          </do_if>
+        </do_if>
+        <do_else>
+          <resume label="finish"/>
+        </do_else>
+      </do_if>
+      <do_if value="not $space.isclass.sector">
+        <do_if value="@$space.sector.exists">
+          <set_value name="$space" exact="$space.sector"/>
+        </do_if>
+        <do_else>
+          <resume label="finish"/>
+        </do_else>
+      </do_if>
+
+      <!-- If not in the target sector - go there first. -->
+      <do_if value="not this.hascontext.{$space}">
+        <run_script name="'move.generic'" result="$sws_movesuccess">
+          <param name="destination" value="$space"/>
+          <param name="endintargetzone" value="true"/>
+          <param name="debugchance" value="$sws_debug_chance"/>
+        </run_script>
+        <do_if value="not $sws_movesuccess">
+          <do_if value="@this.assignedcontrolled.order.isrunning">
+            <set_order_failed order="this.assignedcontrolled.order" text="{1045, 101}" comment="Unable to reach destination."/>
+          </do_if>
+          <debug_to_file chance="$sws_debug_chance" name="this.ship.idcode" directory="'VAS_SectorSweep'" text="'[' + player.age + '] unable to reach sweep sector; aborting'" append="true"/>
+          <resume label="finish"/>
+        </do_if>
+      </do_if>
+
+      <do_if value="this.ship.order" comment="Safety check in case the script is called from non-order script">
+        <!-- Required for all infinite orders -->
+        <set_order_syncpoint_reached order="this.ship.order"/>
+      </do_if>
+
+      <!-- Fresh entry scans immediately: this is also the post-attack rescan path, because the
+           immediate Attack order preempts this order and completion re-enters from 'start'. -->
+
+      <label name="sws_scan"/>
+
+      <set_value name="$sws_scan_in_progress" exact="true"/>
+      <set_value name="$sws_last_scan_time" exact="player.age"/>
+
+      <!-- Safety: the wake handler gates on sector, but the start path can land here mid-transit. -->
+      <do_if value="this.sector != $space">
+        <set_value name="$sws_scan_in_progress" exact="false"/>
+        <resume label="sws_roam"/>
+      </do_if>
+
+      <!-- One sector-wide wake signals every CL scanner in the sector in the same tick, so nobody
+           can see a sibling's Attack order issued moments earlier this same wake - it isn't committed
+           yet. Ticket per sector (reset by the CL WakeTick right before signalling) staggers same-tick
+           ships by a few ms each, enough to cross into the next tick so earlier commits become visible. -->
+      <set_value name="$sws_wake_ticket" exact="if (@global.$vas_cl_wake_ticket.{this.sector} + '') == 'null' then 0 else global.$vas_cl_wake_ticket.{this.sector}"/>
+      <set_value name="global.$vas_cl_wake_ticket.{this.sector}" exact="$sws_wake_ticket + 1"/>
+      <do_if value="$sws_wake_ticket gt 0">
+        <debug_to_file chance="$sws_debug_chance" name="this.ship.idcode" directory="'VAS_SectorSweep'" text="'[' + player.age + '] scan deferred by ' + $sws_wake_ticket * 3ms" append="true"/>
+        <wait exact="$sws_wake_ticket * 3ms"/>
+      </do_if>
+
+      <run_script name="'lib.vas.cl.scan'" result="$sws_potential_target_groups">
+        <param name="scan_interval" value="$sws_interval"/>
+        <param name="max_attack_init_distance" value="$max_attack_init_distance"/>
+        <param name="skip_ship_may_attack" value="$skip_ship_mayattack"/>
+        <param name="skip_station_may_attack" value="$skip_station_mayattack"/>
+        <param name="attack_ships" value="$attack_ships"/>
+        <param name="attack_stations" value="$attack_stations"/>
+        <param name="visibility_all_seeing" value="$sws_all_seeing"/>
+        <param name="visibility_allied_vision" value="$sws_allied_vision"/>
+        <param name="potential_ally_combatant_force_coefficient" value="$sws_potential_ally_coefficient"/>
+        <param name="force_estimation_deviation" value="$sws_force_estimation_deviation"/>
+        <param name="ship_join_threshold" value="$sws_ship_join_threshold"/>
+        <param name="ship_overcommit_limit" value="$sws_ship_overcommit_limit"/>
+        <param name="station_join_threshold" value="$sws_station_join_threshold"/>
+        <param name="station_initiation_threshold" value="$sws_station_initiation_threshold"/>
+        <param name="debugchance" value="$sws_debug_chance"/>
+        <param name="debugdirectory" value="'VAS_SectorSweep'"/>
+        <save_retval name="potential_target_scores" variable="$sws_potential_target_scores"/>
+        <save_retval name="blocking_stations" variable="$sws_blocking_stations"/>
+        <save_retval name="sector_enemy_stations" variable="$sws_sector_enemy_stations"/>
+      </run_script>
+
+      <do_if value="@$sws_potential_target_groups and $sws_potential_target_groups.count gt 0">
+        <!-- Target groups are self-contained: primary target plus its ready-to-use secondary
+             targets list, so no CL cache internals are touched from this mod. -->
+        <set_value name="$sws_selected_group" exact="$sws_potential_target_groups.{1}"/>
+        <set_value name="$sws_selected_target" exact="$sws_selected_group.$primarytarget"/>
+        <set_value name="$sws_secondary_targets" exact="@$sws_selected_group.$secondarytargets"/>
+
+        <debug_to_file chance="$sws_debug_chance" name="this.ship.idcode" directory="'VAS_SectorSweep'" text="'[' + player.age + '] issue attack from sweep target=' + $sws_selected_target.idcode + ' ' + $sws_selected_target.knownname + ' class=' + $sws_selected_target.class + ' secondaryTargets=' + @$sws_secondary_targets.count" append="true"/>
+
+        <run_script name="'lib.vas.cl.issue.attack'">
+          <param name="primary_target" value="$sws_selected_target"/>
+          <param name="secondary_targets" value="$sws_secondary_targets"/>
+          <param name="blocking_stations" value="$sws_blocking_stations"/>
+          <param name="sector_enemy_stations" value="$sws_sector_enemy_stations"/>
+          <param name="pursue_distance" value="$max_pursue_travel_distance"/>
+          <param name="skip_ship_mayattack" value="$skip_ship_mayattack"/>
+          <param name="skip_station_mayattack" value="$skip_station_mayattack"/>
+          <param name="approach_max_waypoints" value="$sws_approach_max_waypoints"/>
+          <param name="debugchance" value="$sws_debug_chance"/>
+        </run_script>
+
+        <!-- Same handoff as vanilla Patrol after move.seekenemies: the immediate Attack order
+             preempts this order during this wait; when the attack finishes, this script re-enters
+             from 'start' and rescans. If the attack ended instantly instead, fall through to
+             roaming - the next wake rescans, avoiding a tight scan-attack-scan loop. -->
+        <set_value name="$sws_scan_in_progress" exact="false"/>
+        <wait min="1s" max="2s"/>
+        <resume label="sws_roam"/>
+      </do_if>
+
+      <set_value name="$sws_scan_in_progress" exact="false"/>
+
+      <label name="sws_roam"/>
+
+      <!-- Roam the sweep sector patrol-style: pick a normal zone away from here, fly to a safe spot
+           in it, repeat. The wake handler interrupts any roam leg for the next scan.
+           TODO idea (wide roam): if fog of war remains within some configured distance of the sector
+           center, prefer roaming TOWARDS unexplored space to reveal it - and maybe once in a while
+           issue a deliberate wide sector roam even without FOW hints. Needs a cheap way to ask
+           "is there unrevealed space near X" first; not implemented yet on purpose. -->
+      <do_if value="this.sector != $space">
+        <resume label="start"/>
+      </do_if>
+
+      <find_zone name="$sws_roam_zone" space="$space" normalzone="true" knownto="this.trueowner">
+        <match_distance object="this.ship" min="40km" comment="Exclude current zone"/>
+      </find_zone>
+      <do_if value="not @$sws_roam_zone.exists">
+        <!-- Fallback: any known normal zone, however close. -->
+        <find_zone name="$sws_roam_zone" space="$space" normalzone="true" knownto="this.trueowner"/>
+      </do_if>
+
+      <do_if value="@$sws_roam_zone.exists">
+        <create_position name="$sws_roam_base_pos" space="$sws_roam_zone" max="$sws_roam_zone.size / 2"/>
+        <set_value name="$sws_roam_y" min="-2km" max="2km"/>
+        <get_safe_pos result="$sws_roam_pos" radius="this.ship.size + 200m" ignored="this.ship" value="position.[$sws_roam_base_pos.x, $sws_roam_y, $sws_roam_base_pos.z]" zone="$sws_roam_zone" allowyaxis="false"/>
+        <remove_value name="$sws_roam_y"/>
+        <remove_value name="$sws_roam_base_pos"/>
+
+        <run_script name="'move.generic'" result="$sws_movesuccess">
+          <param name="destination" value="$sws_roam_zone"/>
+          <param name="position" value="$sws_roam_pos"/>
+          <param name="endintargetzone" value="true"/>
+          <param name="debugchance" value="$sws_debug_chance"/>
+        </run_script>
+      </do_if>
+      <do_else>
+        <!-- No known normal zone found; idle until the next wake or timeout. -->
+        <wait min="5s" max="10s"/>
+      </do_else>
+
+      <wait min="1s" max="5s"/>
+
+      <do_if value="player.age gt @$sws_next_resupply_check" chance="30">
+        <debug_to_file chance="$sws_debug_chance" name="this.ship.idcode" directory="'VAS_SectorSweep'" text="'[' + player.age + '] ready to resupply'" append="true"/>
+        <signal_objects object="this.ship" param="'resupply'" param2="[false]" param3="$sws_debug_chance" comment="param2 = [urgent?, resupplystationID], param3 = debugchance"/>
+        <set_value name="$sws_next_resupply_check" exact="player.age + 30min"/>
+      </do_if>
+
+      <resume label="sws_roam"/>
+
+      <!-- Required for sync point handler -->
+      <label name="finish"/>
+
+      <do_if value="this.assignedcontrolled.defaultorder and (this.assignedcontrolled.defaultorder == this.assignedcontrolled.order)">
+        <cancel_order order="this.assignedcontrolled.defaultorder"/>
+      </do_if>
+    </actions>
+  </attention>
+</aiscript>

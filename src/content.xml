@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<content
+  id="vas_sector_sweep"
+  name="[VAS] Sector Sweep"
+  description="Adds the Sweep Sector default behavior for player ships: sweep the assigned sector using shared faction sight and force-based threat checks, pick fights you can win, join attacks in progress and assault hostile stations. No vanilla AI decision-making is touched - NPC factions keep their vanilla behavior."
+  author="VasiliyTemniy"
+  version="100"
+  date="2026-07-12"
+  save="0">
+  <dependency id="vas_combat_logic" optional="false" name="[VAS] Combat Logic"/>
+  <dependency id="ws_2042901274" optional="false" name="SirNukes Mod Support APIs"/>
+</content>

@@ -1,0 +1,393 @@
+<?xml version="1.0" encoding="utf-8"?>
+<mdscript name="VAS_SectorSweep_Config" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="md.xsd">
+  <!--
+    Config state + Extension Options UI for Sector Sweep. Only MOD-WIDE settings live here; per-ship
+    settings are SweepSector order params. The order script reads the player.entity.$vas_sws_*
+    mirrors, which are re-pushed from ModConfig on every load by InitDefaults. InitDefaults also
+    registers this mod with Combat Logic: the SweepSector order id and the wake heartbeat interval.
+  -->
+  <cues>
+    <!-- Config STATE container. Defaults live in exactly one place: SeedDefaults. -->
+    <cue name="ModConfig" namespace="this">
+      <actions>
+        <run_actions ref="SeedDefaults"/>
+      </actions>
+    </cue>
+
+    <!--@doc
+        Idempotent defaults seeder. String-coercion null checks: explicit
+        false/0 must NOT be re-seeded. -->
+    <library name="SeedDefaults" purpose="run_actions">
+      <actions>
+        <set_value name="$defaults" exact="table[
+          $allSeeing = false,
+          $alliedVision = true,
+          $intervalSec = 30,
+          $approachMaxWaypoints = 4,
+          $shipJoinThresholdPct = 10,
+          $shipOvercommitLimit = 10,
+          $stationJoinThresholdPct = 3,
+          $stationInitiationThresholdPct = 15,
+          $potentialAllyCombatantForceCoeffPct = 50,
+          $forceEstimationDeviationPct = 10,
+          $debugEnabled = false,
+        ]"/>
+        <do_for_each name="$key" in="$defaults.keys.list">
+          <do_if value="(@md.VAS_SectorSweep_Config.ModConfig.{$key} + '') == 'null'">
+            <set_value name="md.VAS_SectorSweep_Config.ModConfig.{$key}" exact="$defaults.{$key}"/>
+          </do_if>
+        </do_for_each>
+      </actions>
+    </library>
+
+    <!-- event_universe_generated fires both at new-game start AND on every
+         savegame load (md.xsd), so it alone covers all sessions. Seeds defaults,
+         re-pushes all aiscript blackboard mirrors and registers with Combat Logic. -->
+    <cue name="InitDefaults" instantiate="true">
+      <conditions>
+        <event_universe_generated/>
+      </conditions>
+      <actions>
+        <run_actions ref="SeedDefaults"/>
+        <run_actions ref="PushMirrors"/>
+        <run_actions ref="RegisterWithCombatLogic"/>
+      </actions>
+    </cue>
+
+    <!--@doc
+        Pushes every ModConfig value onto the player blackboard in the units the
+        order aiscript consumes directly (time, ratios). -->
+    <library name="PushMirrors" purpose="run_actions">
+      <actions>
+        <set_value name="player.entity.$vas_sws_all_seeing" exact="md.VAS_SectorSweep_Config.ModConfig.$allSeeing"/>
+        <set_value name="player.entity.$vas_sws_allied_vision" exact="md.VAS_SectorSweep_Config.ModConfig.$alliedVision"/>
+        <set_value name="player.entity.$vas_sws_interval" exact="md.VAS_SectorSweep_Config.ModConfig.$intervalSec * 1s"/>
+        <set_value name="player.entity.$vas_sws_approach_max_waypoints" exact="md.VAS_SectorSweep_Config.ModConfig.$approachMaxWaypoints"/>
+        <set_value name="player.entity.$vas_sws_ship_join_threshold" exact="md.VAS_SectorSweep_Config.ModConfig.$shipJoinThresholdPct / 100.0"/>
+        <set_value name="player.entity.$vas_sws_ship_overcommit_limit" exact="md.VAS_SectorSweep_Config.ModConfig.$shipOvercommitLimit"/>
+        <set_value name="player.entity.$vas_sws_station_join_threshold" exact="md.VAS_SectorSweep_Config.ModConfig.$stationJoinThresholdPct / 100.0"/>
+        <set_value name="player.entity.$vas_sws_station_initiation_threshold" exact="md.VAS_SectorSweep_Config.ModConfig.$stationInitiationThresholdPct / 100.0"/>
+        <set_value name="player.entity.$vas_sws_potential_ally_combatant_force_coefficient" exact="md.VAS_SectorSweep_Config.ModConfig.$potentialAllyCombatantForceCoeffPct / 100.0"/>
+        <set_value name="player.entity.$vas_sws_force_estimation_deviation" exact="md.VAS_SectorSweep_Config.ModConfig.$forceEstimationDeviationPct / 100.0"/>
+        <set_value name="player.entity.$vas_sws_debug_chance" exact="if md.VAS_SectorSweep_Config.ModConfig.$debugEnabled then 100 else 0"/>
+      </actions>
+    </library>
+
+    <!--@doc
+        Registers this consumer with Combat Logic: SweepSector ships count as potential ally
+        combatants for every CL consumer, and the wake heartbeat runs at least this dense. -->
+    <library name="RegisterWithCombatLogic" purpose="run_actions">
+      <actions>
+        <do_if value="not @global.$vas_cl_combat_order_ids">
+          <set_value name="global.$vas_cl_combat_order_ids" exact="[]"/>
+        </do_if>
+        <do_if value="not global.$vas_cl_combat_order_ids.indexof.{'SweepSector'}">
+          <append_to_list name="global.$vas_cl_combat_order_ids" exact="'SweepSector'"/>
+        </do_if>
+        <do_if value="not @global.$vas_cl_wake_intervals">
+          <set_value name="global.$vas_cl_wake_intervals" exact="table[]"/>
+        </do_if>
+        <set_value name="global.$vas_cl_wake_intervals.{'vas_sws'}" exact="md.VAS_SectorSweep_Config.ModConfig.$intervalSec * 1s"/>
+      </actions>
+    </library>
+
+    <cue name="StartSMO" instantiate="true">
+      <conditions>
+        <event_cue_signalled cue="md.Simple_Menu_Options.Reloaded"/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Register_Options_Menu" param="table[
+          $id = 'vas_sws_options_menu',
+          $columns = 3,
+          $title = {2026071201,100},
+          $onOpen = BuildOptionsMenu,
+        ]"/>
+        <cancel_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="BuildOptionsMenu" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Call_Table_Method" param="table[
+          $method = 'setColWidth',
+          $col = 1,
+          $width = 'Helper.standardButtonHeight',
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Call_Table_Method" param="table[
+          $method = 'setColWidth',
+          $col = 2,
+          $width = 250,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
+          $id = 'allSeeing',
+          $checked = @md.VAS_SectorSweep_Config.ModConfig.$allSeeing,
+          $col = 1,
+          $width = 'Helper.standardButtonHeight',
+          $height = 'Helper.standardButtonHeight',
+          $onClick = OnOptionsCheckboxChanged,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 2,
+          $colSpan = 2,
+          $text = {2026071201,1007},
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
+          $id = 'alliedVision',
+          $checked = @md.VAS_SectorSweep_Config.ModConfig.$alliedVision,
+          $col = 1,
+          $width = 'Helper.standardButtonHeight',
+          $height = 'Helper.standardButtonHeight',
+          $onClick = OnOptionsCheckboxChanged,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 2,
+          $colSpan = 2,
+          $text = {2026071201,1008},
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1009},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'intervalSec',
+          $echo = 'intervalSec',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 1,
+          $max = 60,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$intervalSec,
+          $suffix = ' s',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1019},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'approachMaxWaypoints',
+          $echo = 'approachMaxWaypoints',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 0,
+          $max = 10,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$approachMaxWaypoints,
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1011},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'shipJoinThresholdPct',
+          $echo = 'shipJoinThresholdPct',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 0,
+          $max = 100,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$shipJoinThresholdPct,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1012},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'shipOvercommitLimit',
+          $echo = 'shipOvercommitLimit',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 1,
+          $max = 50,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$shipOvercommitLimit,
+          $suffix = ' x',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1013},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'stationJoinThresholdPct',
+          $echo = 'stationJoinThresholdPct',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 0,
+          $max = 100,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$stationJoinThresholdPct,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1014},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'stationInitiationThresholdPct',
+          $echo = 'stationInitiationThresholdPct',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 1,
+          $max = 100,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$stationInitiationThresholdPct,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1015},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'potentialAllyCombatantForceCoeffPct',
+          $echo = 'potentialAllyCombatantForceCoeffPct',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 0,
+          $max = 100,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$potentialAllyCombatantForceCoeffPct,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 1,
+          $colSpan = 2,
+          $text = {2026071201,1017},
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Slider" param="table[
+          $col = 3,
+          $id = 'forceEstimationDeviationPct',
+          $echo = 'forceEstimationDeviationPct',
+          $height = 'Helper.slidercellMinHeight',
+          $min = 0,
+          $max = 90,
+          $step = 1,
+          $start = @md.VAS_SectorSweep_Config.ModConfig.$forceEstimationDeviationPct,
+          $suffix = ' %',
+          $onSliderCellConfirm = OnOptionsSliderChanged,
+        ]"/>
+
+        <signal_cue_instantly cue="md.Simple_Menu_API.Add_Row"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_CheckBox" param="table[
+          $id = 'debugEnabled',
+          $checked = @md.VAS_SectorSweep_Config.ModConfig.$debugEnabled,
+          $col = 1,
+          $width = 'Helper.standardButtonHeight',
+          $height = 'Helper.standardButtonHeight',
+          $onClick = OnOptionsCheckboxChanged,
+        ]"/>
+        <signal_cue_instantly cue="md.Simple_Menu_API.Make_Text" param="table[
+          $col = 2,
+          $colSpan = 2,
+          $text = {2026071201,1016},
+        ]"/>
+      </actions>
+    </cue>
+
+    <cue name="OnOptionsCheckboxChanged" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <set_value name="md.VAS_SectorSweep_Config.ModConfig.{'$' + event.param.$id}" exact="event.param.$checked"/>
+        <do_if value="event.param.$id == 'debugEnabled'">
+          <do_if value="event.param.$checked">
+            <set_value name="player.entity.$vas_sws_debug_chance" exact="100"/>
+          </do_if>
+          <do_else>
+            <set_value name="player.entity.$vas_sws_debug_chance" exact="0"/>
+          </do_else>
+        </do_if>
+        <do_elseif value="event.param.$id == 'allSeeing'">
+          <set_value name="player.entity.$vas_sws_all_seeing" exact="event.param.$checked"/>
+        </do_elseif>
+        <do_elseif value="event.param.$id == 'alliedVision'">
+          <set_value name="player.entity.$vas_sws_allied_vision" exact="event.param.$checked"/>
+        </do_elseif>
+        <cancel_cue cue="this"/>
+      </actions>
+    </cue>
+
+    <cue name="OnOptionsSliderChanged" instantiate="true">
+      <conditions>
+        <event_cue_signalled/>
+      </conditions>
+      <actions>
+        <do_if value="event.param.$echo == 'intervalSec'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$intervalSec" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_interval" exact="event.param.$value * 1s"/>
+          <!-- Keep the Combat Logic wake heartbeat registration in step; the CL bucket refresh picks it up. -->
+          <do_if value="not @global.$vas_cl_wake_intervals">
+            <set_value name="global.$vas_cl_wake_intervals" exact="table[]"/>
+          </do_if>
+          <set_value name="global.$vas_cl_wake_intervals.{'vas_sws'}" exact="event.param.$value * 1s"/>
+        </do_if>
+        <do_elseif value="event.param.$echo == 'approachMaxWaypoints'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$approachMaxWaypoints" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_approach_max_waypoints" exact="event.param.$value"/>
+        </do_elseif>
+        <do_elseif value="event.param.$echo == 'shipJoinThresholdPct'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$shipJoinThresholdPct" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_ship_join_threshold" exact="event.param.$value / 100.0"/>
+        </do_elseif>
+        <do_elseif value="event.param.$echo == 'shipOvercommitLimit'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$shipOvercommitLimit" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_ship_overcommit_limit" exact="event.param.$value"/>
+        </do_elseif>
+        <do_elseif value="event.param.$echo == 'stationJoinThresholdPct'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$stationJoinThresholdPct" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_station_join_threshold" exact="event.param.$value / 100.0"/>
+        </do_elseif>
+        <do_elseif value="event.param.$echo == 'stationInitiationThresholdPct'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$stationInitiationThresholdPct" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_station_initiation_threshold" exact="event.param.$value / 100.0"/>
+        </do_elseif>
+        <do_elseif value="event.param.$echo == 'potentialAllyCombatantForceCoeffPct'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$potentialAllyCombatantForceCoeffPct" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_potential_ally_combatant_force_coefficient" exact="event.param.$value / 100.0"/>
+        </do_elseif>
+        <do_elseif value="event.param.$echo == 'forceEstimationDeviationPct'">
+          <set_value name="md.VAS_SectorSweep_Config.ModConfig.$forceEstimationDeviationPct" exact="event.param.$value"/>
+          <set_value name="player.entity.$vas_sws_force_estimation_deviation" exact="event.param.$value / 100.0"/>
+        </do_elseif>
+        <cancel_cue cue="this"/>
+      </actions>
+    </cue>
+  </cues>
+</mdscript>

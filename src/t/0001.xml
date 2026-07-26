@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<language>
+  <page id="2026071201" title="[VAS] Sector Sweep" descr="0" voice="no">
+    <t id="100">Sector Sweep</t>
+    <t id="10">Sweep Sector</t>
+    <t id="11">Sweep the sector for hostiles: use shared faction sight, pick fights the fleet can win, join attacks already in progress and assault hostile stations. Powered by Combat Logic.</t>
+    <t id="19">Area to sweep</t>
+    <t id="20">Attack ships</t>
+    <t id="21">Attack stations</t>
+    <t id="22">Bypass civilian ship attack restriction</t>
+    <t id="23">Bypass civilian station attack restriction</t>
+    <t id="24">Max pursuit travelled distance</t>
+    <t id="25">Max attack initiation distance</t>
+    <t id="26">Pursue targets - bound</t>
+    <t id="27">Pursue targets - vanilla unbound</t>
+    <t id="1007">All-seeing - ignore own line of sight</t>
+    <t id="1008">Use allied shared vision, not only same faction</t>
+    <t id="1009">Scan interval</t>
+    <t id="1011">Ship join threshold</t>
+    <t id="1012">Ship overcommit limit</t>
+    <t id="1013">Station assault join threshold</t>
+    <t id="1014">Station assault init threshold</t>
+    <t id="1015">Potential ally combatant force coefficient</t>
+    <t id="1016">Debug logging</t>
+    <t id="1017">Force estimation deviation</t>
+    <t id="1019">Max station-avoidance waypoints</t>
+  </page>
+</language>
