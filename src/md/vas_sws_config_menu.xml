@@ -87,7 +87,7 @@
         <do_if value="not @global.$vas_cl_wake_intervals">
           <set_value name="global.$vas_cl_wake_intervals" exact="table[]"/>
         </do_if>
-        <set_value name="global.$vas_cl_wake_intervals.{'vas_sws'}" exact="md.VAS_SectorSweep_Config.ModConfig.$intervalSec * 1s"/>
+        <set_value name="global.$vas_cl_wake_intervals.{'$vas_sws'}" exact="md.VAS_SectorSweep_Config.ModConfig.$intervalSec * 1s"/>
       </actions>
     </library>
 
@@ -356,7 +356,7 @@
           <do_if value="not @global.$vas_cl_wake_intervals">
             <set_value name="global.$vas_cl_wake_intervals" exact="table[]"/>
           </do_if>
-          <set_value name="global.$vas_cl_wake_intervals.{'vas_sws'}" exact="event.param.$value * 1s"/>
+          <set_value name="global.$vas_cl_wake_intervals.{'$vas_sws'}" exact="event.param.$value * 1s"/>
         </do_if>
         <do_elseif value="event.param.$echo == 'approachMaxWaypoints'">
           <set_value name="md.VAS_SectorSweep_Config.ModConfig.$approachMaxWaypoints" exact="event.param.$value"/>
